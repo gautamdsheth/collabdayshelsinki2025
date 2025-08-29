@@ -27,10 +27,52 @@ export class GraphClient {
         });
     }
 
-    public async getMyProfile(query: string) {
-    const result = await this.graphClient.api('/users').filter(`startswith(jobTitle, '${query}')`).get();
-    // Return an array of display names only
-    return result?.value?.map((user: any) => user.displayName) ?? [];
+    public async getMyProfile(query: string): Promise<string[]> {
+        // Use SharePoint Search REST API instead of Microsoft Graph for this query.
+        // Requires `SP_SITE_URL` to be set in the environment (e.g. https://contoso.sharepoint.com/sites/mysite)
+        const siteUrl = "https://koskila.sharepoint.com";        
+
+        // Build search URL similar to the PowerShell snippet:
+        // $urlDefaultSite/_api/search/query?querytext='<searchProperty>:true'&sourceid='b09a7990-05ea-4af9-81ef-edfab16c4e31'
+        const searchProperty = query;
+        const sourceId = 'b09a7990-05ea-4af9-81ef-edfab16c4e31';
+        const searchUrl = `${siteUrl}/_api/search/query?querytext='Skills:${encodeURIComponent(searchProperty)}*'&sourceid='${sourceId}'`;
+
+        const headers: Record<string, string> = {
+            'Accept': 'application/json',
+            'odata': 'verbose',
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + this._token
+        };
+
+        const response = await fetch(searchUrl, { method: 'GET', headers });
+        if (!response.ok) {
+            // Log error and return empty list to preserve original method's contract
+            console.error('ERROR: SharePoint search request failed', response.status, await response.text());
+            return [];
+        }
+
+        const result = await response.json();
+
+        // The SharePoint search response places rows under PrimaryQueryResult.RelevantResults.Table.Rows
+        const rows = result?.PrimaryQueryResult?.RelevantResults?.Table?.Rows ?? [];
+
+        // Each row contains Cells (array) with Key/Value pairs. Try to extract a display name from common keys.
+        const displayNames = (rows as any[]).map((row: any) => {
+            const cells = row?.Cells?.results ?? row?.Cells ?? [];
+            const findValue = (keys: string[]) => {
+                for (const k of keys) {
+                    const cell = (cells as any[]).find((c: any) => c?.Key === k);
+                    if (cell && cell.Value) return cell.Value;
+                }
+                return null;
+            };
+
+            // Common keys that may contain the user's display name
+            return findValue(['PreferredName', 'Title', 'AccountName', 'WorkEmail']) ?? '';
+        }).filter(Boolean);
+
+        return displayNames;
     }
 
     // Gets the user's photo

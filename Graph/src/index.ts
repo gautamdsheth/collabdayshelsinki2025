@@ -79,7 +79,7 @@ const app = new ApplicationBuilder()
     .withAuthentication(adapter, {
         settings: {
             graph: {
-                scopes: ['User.Read'],
+                scopes: ['https://koskila.sharepoint.com/.default'],
                 msalConfig: {
                     auth: {
                         clientId: process.env.AAD_APP_CLIENT_ID!,
