@@ -172,7 +172,7 @@ app.messageExtensions.submitAction('signOutCommand', async (_context: TurnContex
 async function getUserDetailsFromGraph(token: string, query: string): Promise<{ displayName: string[]; }> {
     // The user is signed in, so use the token to create a Graph Clilent and show profile
     const graphClient = new GraphClient(token);
-    const displayNames = await graphClient.getMyProfile(query);
+    const displayNames = await graphClient.getUserBySkills(query);
     // displayNames is already an array of strings
     return { displayName: displayNames };
 }

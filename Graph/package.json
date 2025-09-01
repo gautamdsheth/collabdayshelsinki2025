@@ -19,10 +19,11 @@
         "url": "https://github.com"
     },
     "dependencies": {
+        "@azure/openai": "^2.0.0",
         "@microsoft/microsoft-graph-client": "^3.0.7",
+        "@microsoft/teams-ai": "~1.7.4",
         "botbuilder": "^4.23.2",
         "botbuilder-azure-blobs": "^4.23.2",
-        "@microsoft/teams-ai": "~1.7.4",
         "dotenv": "^16.5.0",
         "isomorphic-fetch": "^3.0.0",
         "openai": "4.77.4",
@@ -31,9 +32,9 @@
         "shx": "^0.4.0"
     },
     "devDependencies": {
-        "@types/node": "^20.16.1",
         "@types/isomorphic-fetch": "^0.0.39",
         "@types/jsonwebtoken": "^8.5.4",
+        "@types/node": "^20.16.1",
         "@types/restify": "8.5.12",
         "@typescript-eslint/eslint-plugin": "^6.21.0",
         "@typescript-eslint/parser": "^6.21.0",

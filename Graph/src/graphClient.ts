@@ -3,6 +3,10 @@
 
 import { Client } from '@microsoft/microsoft-graph-client';
 import 'isomorphic-fetch';
+import { AzureOpenAI } from 'openai';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 /**
  * This class is a wrapper for the Microsoft Graph API.
@@ -27,16 +31,56 @@ export class GraphClient {
         });
     }
 
-    public async getMyProfile(query: string): Promise<string[]> {
+    public async getUserBySkills(query: string): Promise<string[]> {
+        // First, attempt to extract an exact "leadership skills" value from the provided prompt
+        // using Azure OpenAI Chat Completions. If extraction fails or env vars are missing,
+        // fall back to using the provided query as-is.
+
+        const openaiEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
+        const openaiApiKey = process.env.AZURE_OPENAI_API_KEY;
+        const openaiDeployment = process.env.AZURE_OPENAI_DEPLOYMENT_NAME;
+
+        let searchProperty = query;
+
+        if (openaiEndpoint && openaiApiKey) {
+            try {
+                const apiVersion = process.env.OPENAI_API_VERSION || '2024-10-21';
+                const client = new AzureOpenAI({ endpoint: openaiEndpoint, apiKey: openaiApiKey, deployment: openaiDeployment, apiVersion });
+
+                const messages = [
+                    { role: 'system', content: 'You are a strict skills extractor. When asked for a value, return only the exact value with no extra text.' },
+                    { role: 'user', content: `Extract the exact value for "leadership" from the following prompt. Return only the exact value (for example: "Strategic Thinking") or an empty string if none found. Prompt:\n\n${query}` }
+                ];
+
+                const completion = await client.chat.completions.create({
+                    model: openaiDeployment,
+                    messages: messages as any,
+                    max_tokens: 128,
+                    temperature: 0
+                });
+
+                const extracted = completion.choices?.[0]?.message?.content?.trim() ?? '';
+
+                if (extracted) {
+                    searchProperty = extracted.replace(/'/g, "''");
+                }
+            } catch (err) {
+                console.error('ERROR: Azure OpenAI extraction failed', err);
+                searchProperty = query;
+            }
+        } else {
+            console.warn('AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_API_KEY not set; skipping extraction and using provided query');
+        }
+
         // Use SharePoint Search REST API instead of Microsoft Graph for this query.
         // Requires `SP_SITE_URL` to be set in the environment (e.g. https://contoso.sharepoint.com/sites/mysite)
-        const siteUrl = "https://koskila.sharepoint.com";        
+
+        const siteUrl = "https://koskila.sharepoint.com";
 
         // Build search URL similar to the PowerShell snippet:
         // $urlDefaultSite/_api/search/query?querytext='<searchProperty>:true'&sourceid='b09a7990-05ea-4af9-81ef-edfab16c4e31'
-        const searchProperty = query;
         const sourceId = 'b09a7990-05ea-4af9-81ef-edfab16c4e31';
-        const searchUrl = `${siteUrl}/_api/search/query?querytext='Skills:${encodeURIComponent(searchProperty)}*'&sourceid='${sourceId}'`;
+        const searchUrl = `${siteUrl}/_api/search/query?querytext='${encodeURIComponent(searchProperty)}'&sourceid='${sourceId}'`;
 
         const headers: Record<string, string> = {
             'Accept': 'application/json',
@@ -73,7 +117,7 @@ export class GraphClient {
         }).filter(Boolean);
 
         return displayNames;
-    }
+    }    
 
     // Gets the user's photo
     public async getProfilePhotoAsync(profile: any): Promise<string> {
