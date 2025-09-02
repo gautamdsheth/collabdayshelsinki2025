@@ -108,21 +108,60 @@ app.messageExtensions.query('searchCmd', async (_context: TurnContext, state: Tu
     const count = query.count ?? 10;
 
     const results: MessagingExtensionAttachment[] = [];
-    
+
     const token = state.temp.authTokens['graph'];
     if (!token) {
         throw new Error('No auth token found in state. Authentication failed.');
     }
 
     const userDetails = await getUserDetailsFromGraph(token, searchQuery);
-    // userDetails.displayName is an array of display names
-    userDetails.displayName.forEach((name: string) => {
-        const profileCard = CardFactory.heroCard(name, [], [], {
-            text: name
-        })
+    // userDetails.displayName is now an array of user objects { displayName, workEmail }
+    userDetails.displayName.forEach((user) => {
+        const name = user.displayName;
+        const email = user.workEmail ?? '';
+
+        // Create a simple Adaptive Card with name and email and a mailto action
+        const adaptiveCard = {
+            type: 'AdaptiveCard',
+            $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+            version: '1.4',
+            body: [
+                {
+                    type: 'TextBlock',
+                    text: name,
+                    weight: 'Bolder',
+                    size: 'Medium'
+                },
+                {
+                    type: 'TextBlock',
+                    text: email || 'No email available',
+                    wrap: true,
+                    spacing: 'None',
+                    isSubtle: true,
+                    // make the email text itself clickable when available
+                    ...(email ? { selectAction: { type: 'Action.OpenUrl', url: `mailto:${email}` } } : {})
+                },
+                // Provide an explicit action button within the card body for clients that
+                // don't render top-level actions the same way (improves Teams rendering)
+                ...(email ? [{
+                    type: 'ActionSet',
+                    actions: [
+                        {
+                            type: 'Action.OpenUrl',
+                            title: 'Email',
+                            url: `mailto:${email}`
+                        }
+                    ]
+                }] : [])
+            ],
+            // keep top-level actions empty to avoid duplicate buttons in some clients
+            actions: []
+        };
+
+        const profileCard = CardFactory.adaptiveCard(adaptiveCard as any);
         results.push(profileCard);
     });
-    
+
 
     // Return results as a list
     return {
@@ -167,14 +206,14 @@ app.messageExtensions.submitAction('signOutCommand', async (_context: TurnContex
 /**
  * Get the user details from Graph
  * @param {string} token The token to use to get the user details
- * @returns {Promise<{ displayName: string; profilePhoto: string }>} A promise that resolves to the user details
+ * @returns {Promise<{ displayName: { displayName: string; workEmail?: string }[] }>} A promise that resolves to the user details
  */
-async function getUserDetailsFromGraph(token: string, query: string): Promise<{ displayName: string[]; }> {
-    // The user is signed in, so use the token to create a Graph Clilent and show profile
+async function getUserDetailsFromGraph(token: string, query: string): Promise<{ displayName: { displayName: string; workEmail?: string }[]; }> {
+    // The user is signed in, so use the token to create a Graph Client and show profile
     const graphClient = new GraphClient(token);
-    const displayNames = await graphClient.getUserBySkills(query);
-    // displayNames is already an array of strings
-    return { displayName: displayNames };
+    const users = await graphClient.getUserBySkills(query);
+    // users is already an array of objects { displayName, workEmail }
+    return { displayName: users };
 }
 
 // Listen for incoming server requests.

@@ -32,7 +32,7 @@ export class GraphClient {
         });
     }
 
-    public async getUserBySkills(query: string): Promise<string[]> {
+    public async getUserBySkills(query: string): Promise<{ displayName: string; workEmail?: string }[]> {
         // Extract skills (if possible), search SharePoint for each skill in parallel,
         // then combine and dedupe results.
         const skills = await this.extractSkills(query);
@@ -90,7 +90,7 @@ export class GraphClient {
     }
 
     // Run a SharePoint search for a single skill and return the list of display names.
-    private async runSearchFor(skill: string): Promise<string[]> {
+    private async runSearchFor(skill: string): Promise<{ displayName: string; workEmail?: string }[]> {
         const siteUrl = "https://koskila.sharepoint.com";
         const sourceId = 'b09a7990-05ea-4af9-81ef-edfab16c4e31';
 
@@ -114,7 +114,7 @@ export class GraphClient {
             const result = await resp.json();
             const rows = result?.PrimaryQueryResult?.RelevantResults?.Table?.Rows ?? [];
 
-            const displayNames = (rows as any[]).map((row: any) => {
+            const users = (rows as any[]).map((row: any) => {
                 const cells = row?.Cells?.results ?? row?.Cells ?? [];
                 const findValue = (keys: string[]) => {
                     for (const k of keys) {
@@ -123,10 +123,13 @@ export class GraphClient {
                     }
                     return null;
                 };
-                return findValue(['PreferredName', 'Title', 'AccountName', 'WorkEmail']) ?? '';
-            }).filter(Boolean) as string[];
 
-            return displayNames;
+                const name = findValue(['PreferredName', 'Title', 'AccountName']) ?? '';
+                const email = findValue(['WorkEmail', 'AccountName', 'SPS-Mail']) ?? undefined;
+                return { displayName: String(name).trim(), workEmail: email ? String(email).trim() : undefined };
+            }).filter((u: any) => u.displayName) as { displayName: string; workEmail?: string }[];
+
+            return users;
         } catch (err) {
             console.error(`ERROR: SharePoint search failed for skill='${skill}'`, err);
             return [];
@@ -134,14 +137,16 @@ export class GraphClient {
     }
 
     // Combine arrays of names into a single deduped array, preserving order.
-    private combineResults(resultsArrays: string[][]): string[] {
+    private combineResults(resultsArrays: { displayName: string; workEmail?: string }[][]): { displayName: string; workEmail?: string }[] {
         const seen = new Set<string>();
-        const combined: string[] = [];
+        const combined: { displayName: string; workEmail?: string }[] = [];
         for (const arr of resultsArrays) {
-            for (const name of arr) {
-                if (!seen.has(name)) {
-                    seen.add(name);
-                    combined.push(name);
+            for (const user of arr) {
+                // Prefer dedupe by workEmail when available, otherwise by displayName
+                const key = user.workEmail ? `email:${user.workEmail.toLowerCase()}` : `name:${user.displayName}`;
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    combined.push(user);
                 }
             }
         }
