@@ -5,6 +5,7 @@ import { Client } from '@microsoft/microsoft-graph-client';
 import 'isomorphic-fetch';
 import { AzureOpenAI } from 'openai';
 import dotenv from 'dotenv';
+import { ChatCompletionMessageParam } from 'openai/resources';
 
 dotenv.config();
 
@@ -32,113 +33,118 @@ export class GraphClient {
     }
 
     public async getUserBySkills(query: string): Promise<string[]> {
-        // First, attempt to extract an exact "leadership skills" value from the provided prompt
-        // using Azure OpenAI Chat Completions. If extraction fails or env vars are missing,
-        // fall back to using the provided query as-is.
+        // Extract skills (if possible), search SharePoint for each skill in parallel,
+        // then combine and dedupe results.
+        const skills = await this.extractSkills(query);
+        const uniqueSkills = Array.from(new Set(skills.map(s => s.trim()).filter(Boolean)));
 
+        // Run searches in parallel and return the combined, deduped results
+        const resultsArrays = await Promise.all(uniqueSkills.map(s => this.runSearchFor(s)));
+        return this.combineResults(resultsArrays);
+    }
+
+    // Extract skill strings from the user's query using Azure OpenAI when configured.
+    private async extractSkills(query: string): Promise<string[]> {
         const openaiEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
         const openaiApiKey = process.env.AZURE_OPENAI_API_KEY;
         const openaiDeployment = process.env.AZURE_OPENAI_DEPLOYMENT_NAME;
 
-        let searchProperty = query;
-
-        if (openaiEndpoint && openaiApiKey) {
-            try {
-                const apiVersion = process.env.OPENAI_API_VERSION || '2024-10-21';
-                const client = new AzureOpenAI({ endpoint: openaiEndpoint, apiKey: openaiApiKey, deployment: openaiDeployment, apiVersion });
-
-                const messages = [
-                    { role: 'system', content: 'You are a strict skills extractor. When asked for a value, return only the exact value with no extra text.' },
-                    { role: 'user', content: `Extract the exact value for "leadership" from the following prompt. Return only the exact value (for example: "Strategic Thinking") or an empty string if none found. Prompt:\n\n${query}` }
-                ];
-
-                const completion = await client.chat.completions.create({
-                    model: openaiDeployment,
-                    messages: messages as any,
-                    max_tokens: 128,
-                    temperature: 0
-                });
-
-                const extracted = completion.choices?.[0]?.message?.content?.trim() ?? '';
-
-                if (extracted) {
-                    searchProperty = extracted.replace(/'/g, "''");
-                }
-            } catch (err) {
-                console.error('ERROR: Azure OpenAI extraction failed', err);
-                searchProperty = query;
-            }
-        } else {
+        if (!openaiEndpoint || !openaiApiKey) {
             console.warn('AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_API_KEY not set; skipping extraction and using provided query');
+            return [query];
         }
 
-        // Use SharePoint Search REST API instead of Microsoft Graph for this query.
-        // Requires `SP_SITE_URL` to be set in the environment (e.g. https://contoso.sharepoint.com/sites/mysite)
+        try {
+            const apiVersion = process.env.OPENAI_API_VERSION || '2024-10-21';
+            const client = new AzureOpenAI({ endpoint: openaiEndpoint, apiKey: openaiApiKey, deployment: openaiDeployment, apiVersion });
 
+            const messages: ChatCompletionMessageParam[] = [
+                { role: 'system', content: 'You are a strict extractor. When asked for skills, return ONLY a JSON array of skill strings, with no extra text. Example: ["Strategic Thinking","Team Building"]. If none found, return []' },
+                { role: 'user', content: `Extract all the skills mentioned in the following prompt. Return ONLY a JSON array of strings or an empty array. Prompt:\n\n${query}` }
+            ];
+
+            const completion = await client.chat.completions.create({
+                model: openaiDeployment!,
+                messages: messages,
+                max_tokens: 256,
+                temperature: 0
+            });
+
+            const extracted = completion.choices?.[0]?.message?.content?.trim() ?? '';
+            if (!extracted) return [query];
+
+            try {
+                const parsed = JSON.parse(extracted);
+                if (Array.isArray(parsed)) return parsed.map((s: any) => String(s).trim()).filter(Boolean);
+            } catch (e) {
+                // Fallback: split on common delimiters
+                const fallback = extracted.split(/[\n,;|]/).map(s => s.trim()).filter(Boolean);
+                if (fallback.length) return fallback;
+            }
+        } catch (err) {
+            console.error('ERROR: Azure OpenAI extraction failed', err);
+        }
+
+        // Default to using the raw query when extraction fails
+        return [query];
+    }
+
+    // Run a SharePoint search for a single skill and return the list of display names.
+    private async runSearchFor(skill: string): Promise<string[]> {
         const siteUrl = "https://koskila.sharepoint.com";
-
-        // Build search URL similar to the PowerShell snippet:
-        // $urlDefaultSite/_api/search/query?querytext='<searchProperty>:true'&sourceid='b09a7990-05ea-4af9-81ef-edfab16c4e31'
         const sourceId = 'b09a7990-05ea-4af9-81ef-edfab16c4e31';
-        const searchUrl = `${siteUrl}/_api/search/query?querytext='${encodeURIComponent(searchProperty)}'&sourceid='${sourceId}'`;
 
-        const headers: Record<string, string> = {
+        const headersBase: Record<string, string> = {
             'Accept': 'application/json',
             'odata': 'verbose',
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + this._token
         };
 
-        const response = await fetch(searchUrl, { method: 'GET', headers });
-        if (!response.ok) {
-            // Log error and return empty list to preserve original method's contract
-            console.error('ERROR: SharePoint search request failed', response.status, await response.text());
+        const safeSkill = skill.replace(/'/g, "''");
+        const searchUrl = `${siteUrl}/_api/search/query?querytext='${encodeURIComponent(safeSkill)}'&sourceid='${sourceId}'`;
+
+        try {
+            const resp = await fetch(searchUrl, { method: 'GET', headers: headersBase });
+            if (!resp.ok) {
+                console.error(`ERROR: SharePoint search request failed for skill='${skill}'`, resp.status, await resp.text());
+                return [];
+            }
+
+            const result = await resp.json();
+            const rows = result?.PrimaryQueryResult?.RelevantResults?.Table?.Rows ?? [];
+
+            const displayNames = (rows as any[]).map((row: any) => {
+                const cells = row?.Cells?.results ?? row?.Cells ?? [];
+                const findValue = (keys: string[]) => {
+                    for (const k of keys) {
+                        const cell = (cells as any[]).find((c: any) => c?.Key === k);
+                        if (cell && cell.Value) return cell.Value;
+                    }
+                    return null;
+                };
+                return findValue(['PreferredName', 'Title', 'AccountName', 'WorkEmail']) ?? '';
+            }).filter(Boolean) as string[];
+
+            return displayNames;
+        } catch (err) {
+            console.error(`ERROR: SharePoint search failed for skill='${skill}'`, err);
             return [];
         }
+    }
 
-        const result = await response.json();
-
-        // The SharePoint search response places rows under PrimaryQueryResult.RelevantResults.Table.Rows
-        const rows = result?.PrimaryQueryResult?.RelevantResults?.Table?.Rows ?? [];
-
-        // Each row contains Cells (array) with Key/Value pairs. Try to extract a display name from common keys.
-        const displayNames = (rows as any[]).map((row: any) => {
-            const cells = row?.Cells?.results ?? row?.Cells ?? [];
-            const findValue = (keys: string[]) => {
-                for (const k of keys) {
-                    const cell = (cells as any[]).find((c: any) => c?.Key === k);
-                    if (cell && cell.Value) return cell.Value;
+    // Combine arrays of names into a single deduped array, preserving order.
+    private combineResults(resultsArrays: string[][]): string[] {
+        const seen = new Set<string>();
+        const combined: string[] = [];
+        for (const arr of resultsArrays) {
+            for (const name of arr) {
+                if (!seen.has(name)) {
+                    seen.add(name);
+                    combined.push(name);
                 }
-                return null;
-            };
-
-            // Common keys that may contain the user's display name
-            return findValue(['PreferredName', 'Title', 'AccountName', 'WorkEmail']) ?? '';
-        }).filter(Boolean);
-
-        return displayNames;
-    }    
-
-    // Gets the user's photo
-    public async getProfilePhotoAsync(profile: any): Promise<string> {
-        const graphPhotoEndpoint = `https://graph.microsoft.com/v1.0/users/${profile.id}/photos/240x240/$value`;
-        const graphRequestParams = {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'image/png',
-                authorization: 'bearer ' + this._token
             }
-        };
-
-        const response = await fetch(graphPhotoEndpoint, graphRequestParams);
-        if (!response.ok) {
-            console.error('ERROR: ', response);
         }
-
-        const imageBuffer = await response.arrayBuffer(); //Get image data as raw binary data
-
-        //Convert binary data to an image URL and set the url in state
-        const imageUri = 'data:image/png;base64,' + Buffer.from(imageBuffer).toString('base64');
-        return imageUri;
+        return combined;
     }
 }
