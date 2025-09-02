@@ -33,25 +33,54 @@ export class GraphClient {
     }
 
     public async getUserBySkills(query: string): Promise<{ displayName: string; workEmail?: string; skills?: string[]; department?: string; location?: string }[]> {
-        // Extract skills (if possible), search SharePoint for each skill in parallel,
-        // then combine and dedupe results.
-        const skills = await this.extractSkills(query);
-        const uniqueSkills = Array.from(new Set(skills.map(s => s.trim()).filter(Boolean)));
+        // Extract filters (skills, department, office/location) from the query,
+        // build one or more SharePoint search queries that support any combination
+        // of Skills, Department and OfficeNumber, then combine and dedupe results.
+        const filters = await this.extractFilters(query);
+        const uniqueSkills = Array.from(new Set((filters.skills || []).map(s => s.trim()).filter(Boolean)));
+
+        const searchQueries: string[] = [];
+
+        // Helper to quote values that contain spaces or special chars
+        const q = (v: string) => (/[\s:\(\)\"]/.test(v) ? `"${v}"` : v);
+
+        if (uniqueSkills.length > 0) {
+            // For each skill, create a query that optionally includes Department/OfficeNumber filters
+            for (const skill of uniqueSkills) {
+                let part = `Skills:${q(skill)}`;
+                if (filters.department) part += ` AND Department:${q(filters.department)}`;
+                if (filters.officeNumber) part += ` AND OfficeNumber:${q(filters.officeNumber)}`;
+                searchQueries.push(`(${part})`);
+            }
+        } else if (filters.department || filters.officeNumber) {
+            // No skills, but department/office present -> single combined query
+            const parts: string[] = [];
+            if (filters.officeNumber) parts.push(`OfficeNumber:${q(filters.officeNumber)}`);
+            if (filters.department) parts.push(`Department:${q(filters.department)}`);
+            searchQueries.push(`(${parts.join(' AND ')})`);
+        } else {
+            // Fallback: search by the raw query string in Skills
+            searchQueries.push(`(Skills:${q(query)})`);
+        }
 
         // Run searches in parallel and return the combined, deduped results
-        const resultsArrays = await Promise.all(uniqueSkills.map(s => this.runSearchFor(s)));
+        const resultsArrays = await Promise.all(searchQueries.map(s => this.runSearchFor(s)));
         return this.combineResults(resultsArrays);
     }
 
-    // Extract skill strings from the user's query using Azure OpenAI when configured.
-    private async extractSkills(query: string): Promise<string[]> {
+    // Extract skills, department and office/location from the user's query using Azure OpenAI when configured.
+    // Returns an object: { skills: string[], department?: string, officeNumber?: string }
+    private async extractFilters(query: string): Promise<{ skills: string[]; department?: string; officeNumber?: string }> {
         const openaiEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
         const openaiApiKey = process.env.AZURE_OPENAI_API_KEY;
         const openaiDeployment = process.env.AZURE_OPENAI_DEPLOYMENT_NAME;
 
+        // Default fallback
+        const defaultResult = { skills: [query] };
+
         if (!openaiEndpoint || !openaiApiKey) {
             console.warn('AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_API_KEY not set; skipping extraction and using provided query');
-            return [query];
+            return defaultResult;
         }
 
         try {
@@ -59,8 +88,8 @@ export class GraphClient {
             const client = new AzureOpenAI({ endpoint: openaiEndpoint, apiKey: openaiApiKey, deployment: openaiDeployment, apiVersion });
 
             const messages: ChatCompletionMessageParam[] = [
-                { role: 'system', content: 'You are a strict extractor. When asked for skills, return ONLY a JSON array of skill strings, with no extra text. Example: ["Strategic Thinking","Team Building"]. If none found, return []' },
-                { role: 'user', content: `Extract all the skills mentioned in the following prompt. Return ONLY a JSON array of strings or an empty array. Prompt:\n\n${query}` }
+                { role: 'system', content: 'You are a strict extractor. When asked, return ONLY a JSON object with the keys: "skills" (an array of skill strings), "department" (string) and "officeNumber" (string). Example: {"skills":["Strategic Thinking","Team Building"], "department":"Quality Assurance", "officeNumber":"Helsinki"}. If a value is not present, omit the key or use an empty array for skills. Return NO extra text.' },
+                { role: 'user', content: `Extract skills, department and office/location from the following prompt. Return ONLY a JSON object as described above. Prompt:\n\n${query}` }
             ];
 
             const completion = await client.chat.completions.create({
@@ -71,26 +100,74 @@ export class GraphClient {
             });
 
             const extracted = completion.choices?.[0]?.message?.content?.trim() ?? '';
-            if (!extracted) return [query];
+            if (!extracted) return defaultResult;
 
             try {
                 const parsed = JSON.parse(extracted);
-                if (Array.isArray(parsed)) return parsed.map((s: any) => String(s).trim()).filter(Boolean);
+                if (parsed && typeof parsed === 'object') {
+                    const skills = Array.isArray(parsed.skills) ? parsed.skills.map((s: any) => String(s).trim()).filter(Boolean) : [];
+                    // accept common alternative keys
+                    const department = parsed.department ?? parsed.Department ?? parsed.dept ?? parsed.Dept ?? parsed.departmentName ?? undefined;
+                    const officeNumber = parsed.officeNumber ?? parsed.office ?? parsed.Office ?? parsed.location ?? parsed.Location ?? undefined;
+                    const result: { skills: string[]; department?: string; officeNumber?: string } = { skills };
+                    if (department && String(department).trim()) result.department = String(department).trim();
+                    if (officeNumber && String(officeNumber).trim()) result.officeNumber = String(officeNumber).trim();
+                    if (result.skills.length) return result;
+                    // If no skills but department/office present, still return
+                    if (result.department || result.officeNumber) return result;
+                }
             } catch (e) {
-                // Fallback: split on common delimiters
-                const fallback = extracted.split(/[\n,;|]/).map(s => s.trim()).filter(Boolean);
-                if (fallback.length) return fallback;
+                // fall through to heuristic fallback below
             }
+
+            // Fallback: try simple parsing from the extracted text or original query
+            // Try to split on common delimiters for skills
+            const fallbackSkills = extracted.split(/[\n,;|\/]+/).map(s => s.trim()).filter(Boolean);
+            // Try to detect department/office patterns in the extracted text first, then in the original query
+            const detect = (text: string) => {
+                // explicit labels
+                const deptMatch = /Department\s*[:\-]\s*([^,;\n\)\(]+)/i.exec(text)
+                    || /Dept\.?\s*[:\-]\s*([^,;\n\)\(]+)/i.exec(text)
+                    || /([A-Za-z &\-]+)\s+department/i.exec(text)
+                    || /department\s+of\s+([^,;\n\)\(]+)/i.exec(text);
+
+                const officeMatch = /Office(?:Number)?\s*[:\-]\s*([^,;\n\)\(]+)/i.exec(text)
+                    || /Location\s*[:\-]\s*([^,;\n\)\(]+)/i.exec(text)
+                    || /based in\s+([A-Z][A-Za-z\-\s&]+)/i.exec(text)
+                    || /located in\s+([A-Z][A-Za-z\-\s&]+)/i.exec(text)
+                    || /\b(?:in|at)\s+([A-Z][A-Za-z\-\s&]+)/i.exec(text)
+                    || /office in\s+([A-Z][A-Za-z\-\s&]+)/i.exec(text);
+
+                // prefer shorter captures trimmed to first token if long
+                const clean = (s?: string) => {
+                    if (!s) return undefined;
+                    const v = s.trim();
+                    // stop at comma/semicolon/newline if present
+                    return v.split(/[,;\n]/)[0].trim();
+                };
+
+                return { department: clean(deptMatch?.[1]), officeNumber: clean(officeMatch?.[1]) };
+            };
+
+            let heur = detect(extracted);
+            if (!heur.department && !heur.officeNumber) heur = detect(query);
+
+            const result: { skills: string[]; department?: string; officeNumber?: string } = { skills: fallbackSkills.length ? fallbackSkills : [query] };
+            if (heur.department) result.department = heur.department;
+            if (heur.officeNumber) result.officeNumber = heur.officeNumber;
+            return result;
         } catch (err) {
             console.error('ERROR: Azure OpenAI extraction failed', err);
         }
 
         // Default to using the raw query when extraction fails
-        return [query];
+        return defaultResult;
     }
 
-    // Run a SharePoint search for a single skill and return the list of display names.
-    private async runSearchFor(skill: string): Promise<{ displayName: string; workEmail?: string; skills?: string[]; department?: string; location?: string }[]> {
+    // Run a SharePoint search for a single search query and return the list of display names.
+    // The input is a raw querystring that can include fielded operators such as
+    // (Skills: Leadership AND Department:"Quality Assurance") or (OfficeNumber:Helsinki)
+    private async runSearchFor(searchQuery: string): Promise<{ displayName: string; workEmail?: string; skills?: string[]; department?: string; location?: string }[]> {
         const siteUrl = "https://koskila.sharepoint.com";
         const sourceId = 'b09a7990-05ea-4af9-81ef-edfab16c4e31';
 
@@ -100,13 +177,13 @@ export class GraphClient {
             'Authorization': 'Bearer ' + this._token
         };
 
-        const safeSkill = skill.replace(/'/g, "''");
-        const searchUrl = `${siteUrl}/_api/search/query?querytext='${encodeURIComponent(safeSkill)}'&sourceid='${sourceId}'&selectproperties='PreferredName,WorkEmail,Skills,Department,Location,Title,SPS-Mail,Tags,Department,OfficeNumber,BaseOfficeLocation,SPS-Department,Office,AccountName,PeopleKeywords'`;
+    const safeQuery = searchQuery.replace(/'/g, "''");
+    const searchUrl = `${siteUrl}/_api/search/query?querytext='${encodeURIComponent(safeQuery)}'&sourceid='${sourceId}'&selectproperties='PreferredName,WorkEmail,Skills,Department,Location,Title,SPS-Mail,Tags,Department,OfficeNumber,BaseOfficeLocation,SPS-Department,Office,AccountName,PeopleKeywords'`;
 
         try {
             const resp = await fetch(searchUrl, { method: 'GET', headers: headersBase });
             if (!resp.ok) {
-                console.error(`ERROR: SharePoint search request failed for skill='${skill}'`, resp.status, await resp.text());
+                console.error(`ERROR: SharePoint search request failed for query='${searchQuery}'`, resp.status, await resp.text());
                 return [];
             }
 
@@ -147,7 +224,7 @@ export class GraphClient {
 
             return users;
         } catch (err) {
-            console.error(`ERROR: SharePoint search failed for skill='${skill}'`, err);
+            console.error(`ERROR: SharePoint search failed for query='${searchQuery}'`, err);
             return [];
         }
     }
