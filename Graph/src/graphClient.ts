@@ -32,7 +32,7 @@ export class GraphClient {
         });
     }
 
-    public async getUserBySkills(query: string): Promise<{ displayName: string; workEmail?: string }[]> {
+    public async getUserBySkills(query: string): Promise<{ displayName: string; workEmail?: string; skills?: string[]; department?: string; location?: string }[]> {
         // Extract skills (if possible), search SharePoint for each skill in parallel,
         // then combine and dedupe results.
         const skills = await this.extractSkills(query);
@@ -90,14 +90,13 @@ export class GraphClient {
     }
 
     // Run a SharePoint search for a single skill and return the list of display names.
-    private async runSearchFor(skill: string): Promise<{ displayName: string; workEmail?: string }[]> {
+    private async runSearchFor(skill: string): Promise<{ displayName: string; workEmail?: string; skills?: string[]; department?: string; location?: string }[]> {
         const siteUrl = "https://koskila.sharepoint.com";
         const sourceId = 'b09a7990-05ea-4af9-81ef-edfab16c4e31';
 
         const headersBase: Record<string, string> = {
-            'Accept': 'application/json',
-            'odata': 'verbose',
-            'Content-Type': 'application/json',
+            'Accept': 'application/json;odata=verbose',            
+            'Content-Type': 'application/json;odata=verbose',
             'Authorization': 'Bearer ' + this._token
         };
 
@@ -126,7 +125,24 @@ export class GraphClient {
 
                 const name = findValue(['PreferredName', 'Title', 'AccountName']) ?? '';
                 const email = findValue(['WorkEmail', 'AccountName', 'SPS-Mail']) ?? undefined;
-                return { displayName: String(name).trim(), workEmail: email ? String(email).trim() : undefined };
+                // Try to find skills, department and location from common SharePoint managed properties
+                const rawSkills = findValue(['Skills', 'PeopleKeywords', 'Tags', 'RefinableString01']) ?? '';
+                const department = (findValue(['Department', 'SPS-Department', 'Office']) ?? undefined) as string | undefined;
+                const location = (findValue(['Office', 'SPS-Location', 'Location']) ?? undefined) as string | undefined;
+
+                // Normalize skills into an array (split on common delimiters)
+                const skills: string[] = String(rawSkills)
+                    .split(/[,;|\n\/]+/)
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+
+                return {
+                    displayName: String(name).trim(),
+                    workEmail: email ? String(email).trim() : undefined,
+                    skills: skills.length ? skills : undefined,
+                    department: department ? String(department).trim() : undefined,
+                    location: location ? String(location).trim() : undefined
+                };
             }).filter((u: any) => u.displayName) as { displayName: string; workEmail?: string }[];
 
             return users;
@@ -136,17 +152,33 @@ export class GraphClient {
         }
     }
 
-    // Combine arrays of names into a single deduped array, preserving order.
-    private combineResults(resultsArrays: { displayName: string; workEmail?: string }[][]): { displayName: string; workEmail?: string }[] {
+    // Combine arrays of users into a single deduped array, preserving order.
+    // When duplicates are found we merge skills arrays and prefer non-empty department/location values.
+    private combineResults(resultsArrays: { displayName: string; workEmail?: string; skills?: string[]; department?: string; location?: string }[][]): { displayName: string; workEmail?: string; skills?: string[]; department?: string; location?: string }[] {
         const seen = new Set<string>();
-        const combined: { displayName: string; workEmail?: string }[] = [];
+        const combined: { displayName: string; workEmail?: string; skills?: string[]; department?: string; location?: string }[] = [];
         for (const arr of resultsArrays) {
             for (const user of arr) {
-                // Prefer dedupe by workEmail when available, otherwise by displayName
                 const key = user.workEmail ? `email:${user.workEmail.toLowerCase()}` : `name:${user.displayName}`;
                 if (!seen.has(key)) {
                     seen.add(key);
-                    combined.push(user);
+                    // Clone to avoid accidental mutation
+                    combined.push({
+                        displayName: user.displayName,
+                        workEmail: user.workEmail,
+                        skills: user.skills ? Array.from(new Set(user.skills)) : undefined,
+                        department: user.department,
+                        location: user.location
+                    });
+                } else {
+                    // Merge into existing entry: add skills, fill department/location when missing
+                    const existing = combined.find((u) => (u.workEmail ? `email:${u.workEmail!.toLowerCase()}` : `name:${u.displayName}`) === key)!;
+                    if (user.skills && user.skills.length) {
+                        const mergedSkills = new Set([...(existing.skills || []), ...user.skills]);
+                        existing.skills = Array.from(mergedSkills);
+                    }
+                    if (!existing.department && user.department) existing.department = user.department;
+                    if (!existing.location && user.location) existing.location = user.location;
                 }
             }
         }

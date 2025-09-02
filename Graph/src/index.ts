@@ -118,42 +118,63 @@ app.messageExtensions.query('searchCmd', async (_context: TurnContext, state: Tu
     // userDetails.displayName is now an array of user objects { displayName, workEmail }
     userDetails.displayName.forEach((user) => {
         const name = user.displayName;
-        const email = user.workEmail ?? '';
+        const email = (user as any).workEmail ?? '';
+        const skills = (user as any).skills as string[] | undefined;
+        const department = (user as any).department as string | undefined;
+        const location = (user as any).location as string | undefined;
 
-        // Create a simple Adaptive Card with name and email and a mailto action
+        // Build card body with optional sections
+        const body: any[] = [
+            {
+                type: 'TextBlock',
+                text: name,
+                weight: 'Bolder',
+                size: 'Medium'
+            }
+        ];
+
+        if (email) {
+            body.push({
+                type: 'TextBlock',
+                text: email,
+                wrap: true,
+                spacing: 'None',
+                isSubtle: true,
+                ...(email ? { selectAction: { type: 'Action.OpenUrl', url: `mailto:${email}` } } : {})
+            });
+
+            // Add explicit Email button for Teams rendering
+            body.push({
+                type: 'ActionSet',
+                actions: [
+                    {
+                        type: 'Action.OpenUrl',
+                        title: 'Email',
+                        url: `mailto:${email}`
+                    }
+                ]
+            });
+        } else {
+            body.push({ type: 'TextBlock', text: 'No email available', wrap: true, isSubtle: true });
+        }
+
+        if (department) {
+            body.push({ type: 'TextBlock', text: `Department: ${department}`, wrap: true, spacing: 'Small', isSubtle: true });
+        }
+
+        if (location) {
+            body.push({ type: 'TextBlock', text: `Location: ${location}`, wrap: true, spacing: 'Small', isSubtle: true });
+        }
+
+        if (skills && skills.length) {
+            body.push({ type: 'TextBlock', text: `Skills: ${skills.join(', ')}`, wrap: true, spacing: 'Small', isSubtle: true });
+        }
+
         const adaptiveCard = {
             type: 'AdaptiveCard',
             $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
             version: '1.4',
-            body: [
-                {
-                    type: 'TextBlock',
-                    text: name,
-                    weight: 'Bolder',
-                    size: 'Medium'
-                },
-                {
-                    type: 'TextBlock',
-                    text: email || 'No email available',
-                    wrap: true,
-                    spacing: 'None',
-                    isSubtle: true,
-                    // make the email text itself clickable when available
-                    ...(email ? { selectAction: { type: 'Action.OpenUrl', url: `mailto:${email}` } } : {})
-                },
-                // Provide an explicit action button within the card body for clients that
-                // don't render top-level actions the same way (improves Teams rendering)
-                ...(email ? [{
-                    type: 'ActionSet',
-                    actions: [
-                        {
-                            type: 'Action.OpenUrl',
-                            title: 'Email',
-                            url: `mailto:${email}`
-                        }
-                    ]
-                }] : [])
-            ],
+            body: body,
             // keep top-level actions empty to avoid duplicate buttons in some clients
             actions: []
         };
