@@ -95,13 +95,13 @@ export class GraphClient {
         const sourceId = 'b09a7990-05ea-4af9-81ef-edfab16c4e31';
 
         const headersBase: Record<string, string> = {
-            'Accept': 'application/json;odata=verbose',            
-            'Content-Type': 'application/json;odata=verbose',
+            'Accept': 'application/json',            
+            'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + this._token
         };
 
         const safeSkill = skill.replace(/'/g, "''");
-        const searchUrl = `${siteUrl}/_api/search/query?querytext='${encodeURIComponent(safeSkill)}'&sourceid='${sourceId}'`;
+        const searchUrl = `${siteUrl}/_api/search/query?querytext='${encodeURIComponent(safeSkill)}'&sourceid='${sourceId}'&selectproperties='PreferredName,WorkEmail,Skills,Department,Location,Title,SPS-Mail,Tags,Department,OfficeNumber,BaseOfficeLocation,SPS-Department,Office,AccountName,PeopleKeywords'`;
 
         try {
             const resp = await fetch(searchUrl, { method: 'GET', headers: headersBase });
@@ -128,7 +128,7 @@ export class GraphClient {
                 // Try to find skills, department and location from common SharePoint managed properties
                 const rawSkills = findValue(['Skills', 'PeopleKeywords', 'Tags', 'RefinableString01']) ?? '';
                 const department = (findValue(['Department', 'SPS-Department', 'Office']) ?? undefined) as string | undefined;
-                const location = (findValue(['Office', 'SPS-Location', 'Location']) ?? undefined) as string | undefined;
+                const location = (findValue(['Office', 'SPS-Location', 'Location', 'OfficeNumber']) ?? undefined) as string | undefined;
 
                 // Normalize skills into an array (split on common delimiters)
                 const skills: string[] = String(rawSkills)
