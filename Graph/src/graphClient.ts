@@ -37,6 +37,7 @@ export class GraphClient {
         // build one or more SharePoint search queries that support any combination
         // of Skills, Department and OfficeNumber, then combine and dedupe results.
         const filters = await this.extractFilters(query);
+        
         const uniqueSkills = Array.from(new Set((filters.skills || []).map(s => s.trim()).filter(Boolean)));
 
         const searchQueries: string[] = [];
@@ -100,6 +101,7 @@ export class GraphClient {
             });
 
             const extracted = completion.choices?.[0]?.message?.content?.trim() ?? '';
+            console.log('Azure OpenAI extraction result:', extracted);
             if (!extracted) return defaultResult;
 
             try {

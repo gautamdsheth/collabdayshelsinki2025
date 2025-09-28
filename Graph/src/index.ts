@@ -231,6 +231,7 @@ app.messageExtensions.submitAction('signOutCommand', async (_context: TurnContex
  */
 async function getUserDetailsFromGraph(token: string, query: string): Promise<{ displayName: { displayName: string; workEmail?: string }[]; }> {
     // The user is signed in, so use the token to create a Graph Client and show profile
+    console.log('Getting query from Copilot API:', query);
     const graphClient = new GraphClient(token);
     const users = await graphClient.getUserBySkills(query);
     // users is already an array of objects { displayName, workEmail }
